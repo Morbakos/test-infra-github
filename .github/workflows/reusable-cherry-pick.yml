@@ -9,6 +9,10 @@ on:
       target_branch:
         required: true
         type: string
+      origin_pr_url: # 1. NOUVEL INPUT ICI
+        required: false
+        type: string
+        default: ''
 
 jobs:
   cherry-pick-pr:
@@ -32,36 +36,34 @@ jobs:
         id: cp
         run: |
           SHORT_SHA=$(echo "${{ inputs.commit_sha }}" | cut -c1-7)
-          
-          # SOLUTION AU PROBLEME : On ajoute le run_id. Si tu relances le job, le run_id reste le même,
-          # mais on va faire un push --force pour écraser proprement l'ancienne tentative.
           NEW_BRANCH="cherry-pick-${SHORT_SHA}-to-${{ inputs.target_branch }}-${{ github.run_id }}"
           echo "branch_name=$NEW_BRANCH" >> $GITHUB_OUTPUT
 
-          # Se placer sur la branche cible et créer la branche de travail
           git checkout ${{ inputs.target_branch }}
           git checkout -b $NEW_BRANCH
 
-          # IMPORTANT (-m 1) : Obligatoire pour cherry-picker un commit de merge de PR
           git cherry-pick -m 1 ${{ inputs.commit_sha }} || (git cherry-pick --abort && echo "Conflit détecté, annulation." && exit 1)
-
-          # On force le push au cas où le job est relancé
           git push origin $NEW_BRANCH --force
 
       - name: Création de la Pull Request
         env:
-          # Utilise github.token ou ton secret PAT_CHERRY_PICK selon tes restrictions
           GH_TOKEN: ${{ secrets.PAT_CHERRY_PICK || github.token }} 
+          ORIGIN_PR_URL: ${{ inputs.origin_pr_url }} # 2. ON PASSE L'INPUT EN VARIABLE ENV
         run: |
-          # On vérifie d'abord si la PR n'existe pas déjà (évite l'erreur en cas de re-run du job)
           PR_EXISTS=$(gh pr list --head "${{ steps.cp.outputs.branch_name }}" --base "${{ inputs.target_branch }}" --json url --jq '.[0].url')
           
+          # 3. CONSTRUCTION DE LA DESCRIPTION DYNAMIQUE
+          PR_BODY="Ce PR a été généré automatiquement suite au merge du commit \`${{ inputs.commit_sha }}\`."
+          if [ -n "$ORIGIN_PR_URL" ]; then
+            PR_BODY="$PR_BODY"$'\n\n'"🔗 **PR d'origine :** $ORIGIN_PR_URL"
+          fi
+
           if [ -z "$PR_EXISTS" ]; then
             gh pr create \
               --base "${{ inputs.target_branch }}" \
               --head "${{ steps.cp.outputs.branch_name }}" \
               --title "🍒 Cherry-pick: commit ${{ inputs.commit_sha }} vers ${{ inputs.target_branch }}" \
-              --body "Ce PR a été généré automatiquement suite au merge de la PR précédente sur la branche de prod."
+              --body "$PR_BODY"
           else
             echo "La Pull Request existe déjà et a été mise à jour par le push --force : $PR_EXISTS"
           fi
