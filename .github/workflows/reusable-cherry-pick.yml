@@ -4,18 +4,15 @@ on:
   workflow_call:
     inputs:
       commit_sha:
-        description: 'Le SHA du commit à cherry-picker'
         required: true
         type: string
       target_branch:
-        description: 'La branche cible de la PR (ex: release/v1.0)'
         required: true
         type: string
 
 jobs:
   cherry-pick-pr:
     runs-on: ubuntu-latest
-    # Il est crucial de donner les droits d'écriture pour créer la branche et la PR
     permissions:
       contents: write
       pull-requests: write
@@ -34,32 +31,37 @@ jobs:
       - name: Création de la branche et Cherry-pick
         id: cp
         run: |
-          # 1. Générer un nom de branche unique (ex: cherry-pick-abc1234-to-main)
           SHORT_SHA=$(echo "${{ inputs.commit_sha }}" | cut -c1-7)
-          NEW_BRANCH="cherry-pick-${SHORT_SHA}-to-${{ inputs.target_branch }}"
           
-          # Exposer le nom de la branche pour l'étape suivante
+          # SOLUTION AU PROBLEME : On ajoute le run_id. Si tu relances le job, le run_id reste le même,
+          # mais on va faire un push --force pour écraser proprement l'ancienne tentative.
+          NEW_BRANCH="cherry-pick-${SHORT_SHA}-to-${{ inputs.target_branch }}-${{ github.run_id }}"
           echo "branch_name=$NEW_BRANCH" >> $GITHUB_OUTPUT
 
-          # 2. Se placer sur la branche cible (base de la PR)
+          # Se placer sur la branche cible et créer la branche de travail
           git checkout ${{ inputs.target_branch }}
-
-          # 3. Créer et basculer sur la nouvelle branche
           git checkout -b $NEW_BRANCH
 
-          # 4. Tenter le cherry-pick
-          git cherry-pick ${{ inputs.commit_sha }} || (git cherry-pick --abort && echo "Conflit détecté, annulation manuelle requise." && exit 1)
+          # IMPORTANT (-m 1) : Obligatoire pour cherry-picker un commit de merge de PR
+          git cherry-pick -m 1 ${{ inputs.commit_sha }} || (git cherry-pick --abort && echo "Conflit détecté, annulation." && exit 1)
 
-          # 5. Pousser la nouvelle branche
-          git push origin $NEW_BRANCH
+          # On force le push au cas où le job est relancé
+          git push origin $NEW_BRANCH --force
 
       - name: Création de la Pull Request
         env:
-          # On utilise le CLI GitHub intégré aux runners, authentifié avec le token standard
-          GH_TOKEN: ${{ github.token }}
+          # Utilise github.token ou ton secret PAT_CHERRY_PICK selon tes restrictions
+          GH_TOKEN: ${{ secrets.PAT_CHERRY_PICK || github.token }} 
         run: |
-          gh pr create \
-            --base "${{ inputs.target_branch }}" \
-            --head "${{ steps.cp.outputs.branch_name }}" \
-            --title "🍒 Cherry-pick: commit ${{ inputs.commit_sha }} vers ${{ inputs.target_branch }}" \
-            --body "Ce PR a été généré automatiquement par GitHub Actions. Il contient le cherry-pick du commit \`${{ inputs.commit_sha }}\` vers la branche \`${{ inputs.target_branch }}\`."
+          # On vérifie d'abord si la PR n'existe pas déjà (évite l'erreur en cas de re-run du job)
+          PR_EXISTS=$(gh pr list --head "${{ steps.cp.outputs.branch_name }}" --base "${{ inputs.target_branch }}" --json url --jq '.[0].url')
+          
+          if [ -z "$PR_EXISTS" ]; then
+            gh pr create \
+              --base "${{ inputs.target_branch }}" \
+              --head "${{ steps.cp.outputs.branch_name }}" \
+              --title "🍒 Cherry-pick: commit ${{ inputs.commit_sha }} vers ${{ inputs.target_branch }}" \
+              --body "Ce PR a été généré automatiquement suite au merge de la PR précédente sur la branche de prod."
+          else
+            echo "La Pull Request existe déjà et a été mise à jour par le push --force : $PR_EXISTS"
+          fi
